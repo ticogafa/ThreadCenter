@@ -39,7 +39,7 @@ class Server(NetworkDevice):
             'protocol': client_protocol,
             'max_fragment_size': max_fragment_size,
             'window_size': requested_window_size,
-            'session_id': session_id,'127.0.0.1'
+            'session_id': session_id,
             'handshake_complete': False,
             'socket': client_socket,
             'expected_seq_num': 0,  # For GBN

@@ -39,8 +39,9 @@ class NetworkDevice:
         self.corruption_probability = 0.0
         self.delay_probability = 0.0
         self.delay_time = 0.0
-        
-        self._socket:socket.socket #DO NOT ASSIGN HERE, IT WILL BE ASSIGNED IN THE CONNECT METHOD
+
+        # Socket will be created in connect methods of subclasses
+        self._socket = None  # type: ignore[attr-defined]
     def create_packet(self, message_type, payload, sequence_num=0, last_packet=False):
         """Create a packet with header and payload, including last_packet flag as 1 byte."""
         # Ensure payload is bytes
@@ -112,7 +113,7 @@ class NetworkDevice:
                 # Parse header
                 try:
                     payload_length, message_type, sequence_num, checksum, last_packet = struct.unpack('!IBH4sB', header)
-                except struct.error     as e:
+                except struct.error as e:
                     print(f"[ERROR] Failed to unpack header from {client_address}: {e}")
                     break
 
@@ -297,8 +298,17 @@ class NetworkDevice:
         else:
             mode = "Custom"
             print(f"[CONFIG] Custom mode: loss={self.loss_probability}, corruption={self.corruption_probability}, delay={self.delay_probability}, delay_time={self.delay_time}s")
-        
+
         print(f"[CONFIG] Channel set to {mode} mode.")
+
+    def handle_disconnect(self, client_socket: socket.socket, client_address: str) -> bool:
+        """Handle client disconnect: send ACK and cleanup."""
+        try:
+            ack_packet = self.create_packet(settings.ACK_TYPE, "Disconnect ACK")
+            client_socket.sendall(ack_packet)
+        except Exception as e:
+            print(f"[ERROR] Failed to ACK disconnect for {client_address}: {e}")
+        return True
 
     def update_simulation_params(self, loss_prob=0.0, corruption_prob=0.0, delay_prob=0.0, delay_time=0.0):
         """Update local simulation parameters for status display (client-side only)."""
@@ -307,8 +317,4 @@ class NetworkDevice:
         self.delay_probability = delay_prob
         self.delay_time = delay_time
 
-# Example usage of the NetworkDevice class
-device = NetworkDevice("127.0.0.1", 8080)
-device.set_channel_conditions(loss_prob=1.0)  # Simula 100% de perda de pacotes
-device.set_channel_conditions(corruption_prob=1.0)  # Simula 100% de corrupção
-device.set_channel_conditions(delay_prob=1.0, delay_time=2.0)  # Simula 100% de atraso com 2 segundos
+# Note: This module defines the base NetworkDevice class and should not execute code on import.

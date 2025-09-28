@@ -4,6 +4,9 @@ HANDSHAKE_ACK_TYPE = 0x03  # Acknowledgment specific to handshake
 DATA_TYPE = 0x04           # Data message
 NACK_TYPE = 0x05           # Negative acknowledgment
 DISCONNECT_TYPE = 0x06     # Disconnect message
+SET_NICK_TYPE = 0x07       # Set/display nickname
+LIST_REQUEST_TYPE = 0x08   # Request list of connected clients
+LIST_RESPONSE_TYPE = 0x09  # Response with list of connected clients
 
 GBN = 0  # Go-Back-N
 SR = 1   # Selective Repeat

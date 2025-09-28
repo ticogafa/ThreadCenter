@@ -2,6 +2,9 @@ import socket
 import json
 import argparse
 import time
+import threading
+import queue
+from collections import deque
 from src.network_device import NetworkDevice
 from src.core import settings
 from src.constants.constants_client import CLIENT_LOGS, CLIENT_ERRORS
@@ -17,6 +20,12 @@ class Client(NetworkDevice):
         self.handshake_complete = False
         self.session_id = None
         self.is_connected = False
+        self._receiver_thread = None  # type: ignore[assignment]
+        self._stop_event = threading.Event()
+        self._ack_queue = queue.Queue()
+        self._last_messages = deque(maxlen=50)
+        self._last_full_messages = deque(maxlen=50)
+        self._reassembly = {}
         # Sliding window buffers
         self.packet_buffer = {}  # Store packets that have been sent but not acknowledged
         self.ack_received = set()  # Keep track of which packets have been acknowledged
@@ -86,6 +95,10 @@ class Client(NetworkDevice):
 
         self.handshake_complete = True
         self.is_connected = True
+        # Start receiver thread to listen server/broadcast messages
+        self._stop_event.clear()
+        self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
+        self._receiver_thread.start()
         print(CLIENT_LOGS.HANDSHAKE_SUCCESS)
         print(CLIENT_LOGS.CONNECTION_ESTABLISHED.format(protocol=self.protocol, max_fragment_size=self.max_fragment_size, window_size=self.window_size))
         return True
@@ -112,19 +125,25 @@ class Client(NetworkDevice):
             data_packet = self.create_packet(settings.DATA_TYPE, encoded_message, sequence_num=seq_num, last_packet=last_packet)
             print(CLIENT_LOGS.SENDING_FRAGMENT.format(current=seq_num+1, total=total_fragments, fragment=fragment, seq_num=seq_num))
             self._socket.sendall(data_packet)
-            response_packet = self._socket.recv(self.BUFFER_SIZE)
-            if not response_packet:
-                raise ConnectionError(CLIENT_ERRORS.NO_RESPONSE)
-            parsed = self.parse_packet(response_packet)
-            if not parsed:
-                raise ValueError(CLIENT_ERRORS.INVALID_RESPONSE)
-            if parsed['type'] == settings.ACK_TYPE and parsed['sequence'] == seq_num:
-                print(CLIENT_LOGS.SERVER_ACK.format(seq_num=seq_num))
+            # Wait for ACK/NACK for this sequence from receiver thread
+            while True:
+                try:
+                    parsed = self._ack_queue.get(timeout=5.0)
+                except queue.Empty:
+                    raise ConnectionError(CLIENT_ERRORS.NO_RESPONSE)
+                if parsed.get('sequence') != seq_num:
+                    # Not for us; ignore (single outstanding send typical). Could buffer if needed.
+                    continue
+                if parsed['type'] == settings.ACK_TYPE:
+                    print(CLIENT_LOGS.SERVER_ACK.format(seq_num=seq_num))
+                    break
+                if parsed['type'] == settings.NACK_TYPE:
+                    print(CLIENT_LOGS.SERVER_NACK.format(seq_num=seq_num))
+                    # retry outer while True
+                    break
+                # Unknown type; keep waiting
+            if parsed['type'] == settings.ACK_TYPE:
                 break
-            elif parsed['type'] == settings.NACK_TYPE and parsed['sequence'] == seq_num:
-                print(CLIENT_LOGS.SERVER_NACK.format(seq_num=seq_num))
-            else:
-                raise ValueError(CLIENT_ERRORS.UNEXPECTED_RESPONSE.format(parsed=parsed))
 
     def reset_parameters(self):
         # Reset sequence numbers for this message
@@ -238,48 +257,186 @@ class Client(NetworkDevice):
         print(CLIENT_LOGS.SERVER_DISCONNECT_ACK)
         self._socket.close()
         self.handshake_complete = False
+        self._stop_event.set()
+        if self._receiver_thread and self._receiver_thread.is_alive():
+            self._receiver_thread.join(timeout=1.0)
         print(CLIENT_LOGS.DISCONNECTED)
+
+    def _receiver_loop(self):
+        """Continuously receive DATA (broadcast) and print to stdout."""
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self._socket.settimeout(0.5)
+                    packet = self._socket.recv(self.BUFFER_SIZE)
+                    if not packet:
+                        continue
+                    parsed = self.parse_packet(packet)
+                    if not parsed:
+                        continue
+                    if parsed['type'] == settings.DATA_TYPE:
+                        try:
+                            txt = parsed['payload'].decode('utf-8')
+                        except Exception:
+                            txt = f"<binary {len(parsed['payload'])} bytes>"
+                        print(f"\n[BROADCAST] {txt}")
+                        self._last_messages.append(txt)
+                        # Tenta reconstituir mensagem completa por remetente usando last_packet
+                        from_addr = "_"
+                        content = txt
+                        if txt.startswith('[') and '] ' in txt:
+                            try:
+                                end = txt.index('] ')
+                                from_addr = txt[1:end]
+                                content = txt[end+2:]
+                            except Exception:
+                                pass
+                        bucket = self._reassembly.setdefault(from_addr, [])
+                        bucket.append(content)
+                        if parsed.get('last_packet'):
+                            full = ''.join(bucket)
+                            self._last_full_messages.append(full)
+                            self._reassembly[from_addr] = []
+                    elif parsed['type'] in (settings.ACK_TYPE, settings.NACK_TYPE):
+                        # Route ACK/NACK to sender path via queue
+                        try:
+                            self._ack_queue.put_nowait(parsed)
+                        except Exception:
+                            pass
+                    # Other types are handled by sender path
+                except socket.timeout:
+                    continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def run_chat(self):
+        """Simple chat loop: reads lines and sends as message (fragmented)."""
+        print("Type messages and press Enter to send. Ctrl+C to exit.")
+        print("Commands: /who (list users), /nick <name> (set nickname)")
+        try:
+            while True:
+                msg = input("> ")
+                if not msg:
+                    continue
+                # Commands
+                if msg.startswith('/who'):
+                    try:
+                        pkt = self.create_packet(settings.LIST_REQUEST_TYPE, "{}")
+                        self._socket.sendall(pkt)
+                        resp = self._socket.recv(self.BUFFER_SIZE)
+                        parsed = self.parse_packet(resp)
+                        if parsed and parsed['type'] == settings.LIST_RESPONSE_TYPE:
+                            try:
+                                names = json.loads(parsed['payload'])
+                                print("[USERS] " + (", ".join(names) if names else "<none>"))
+                            except Exception:
+                                print("[USERS] <parse error>")
+                        else:
+                            print("[USERS] no response")
+                    except Exception as e:
+                        print(f"[ERROR] who failed: {e}")
+                    continue
+                if msg.startswith('/nick '):
+                    name = msg[6:].strip()
+                    if not name:
+                        print("[ERROR] usage: /nick <name>")
+                        continue
+                    try:
+                        pkt = self.create_packet(settings.SET_NICK_TYPE, name)
+                        self._socket.sendall(pkt)
+                        # optional ack read (non-blocking best-effort)
+                        self._socket.settimeout(0.5)
+                        try:
+                            resp = self._socket.recv(self.BUFFER_SIZE)
+                            _ = self.parse_packet(resp)
+                        except Exception:
+                            pass
+                        finally:
+                            self._socket.settimeout(None)
+                        print(f"[NICK] set to '{name}'")
+                    except Exception as e:
+                        print(f"[ERROR] nick failed: {e}")
+                    continue
+                self.send_message(msg)
+        except KeyboardInterrupt:
+            print("\nExiting chat...")
+            self.disconnect()
 
 if __name__ == '__main__':
     try:
         # Parse command line arguments
         parser = argparse.ArgumentParser(description='Custom Protocol Client')
-        parser.add_argument('--host', default='127.0.0.1', help='Server address')
-        parser.add_argument('--port', type=int, default=DEFAULT_PORT, help='Server port')
+        # Defaults are only fallbacks; we'll prompt the user if flags are omitted
+        parser.add_argument('--host', default=None, help='Server address (optional; will prompt)')
+        parser.add_argument('--port', type=int, default=None, help='Server port (optional; will prompt)')
         parser.add_argument('--max-fragment-size', type=int, default=3, help='Maximum fragment size')
-        parser.add_argument('--protocol', choices=['gbn', 'sr'], default='gbn', 
-                           help='Reliable transfer protocol (Go-Back-N or Selective Repeat)')
+        parser.add_argument('--protocol', choices=['gbn', 'sr'], default='gbn',
+                            help='Reliable transfer protocol (Go-Back-N or Selective Repeat)')
         parser.add_argument('--window-size', type=int, default=4,
-                           help='Sliding window size (number of packets in flight)')
+                            help='Sliding window size (number of packets in flight)')
+        # Force default mode to chat; UI still available with --mode ui
+        parser.add_argument('--mode', choices=['ui', 'chat'], default='chat',
+                            help='Run in interactive UI or simple chat')
 
         args = parser.parse_args()
 
+        # Prompt for host/port if omitted
+        host = args.host or input("Server host [127.0.0.1]: ").strip() or '127.0.0.1'
+        try:
+            port_str = (str(args.port) if args.port is not None
+                        else input(f"Server port [{DEFAULT_PORT}]: ").strip())
+            port = int(port_str) if port_str else DEFAULT_PORT
+        except Exception:
+            port = DEFAULT_PORT
+
         # Create client with provided arguments
         client = Client(
-            server_addr=args.host,
-            server_port=args.port,
+            server_addr=host,
+            server_port=port,
             max_fragment_size=args.max_fragment_size,
             protocol=args.protocol,
             window_size=args.window_size
         )
 
-        # Create terminal UI and run interactive session
-        from src.terminal_ui import TerminalUI
-        terminal = TerminalUI(client)
-        terminal.configure_protocol_menu()
-        while True:
+        if args.mode == 'ui':
+            from src.terminal_ui import TerminalUI
+            terminal = TerminalUI(client)
+            terminal.configure_protocol_menu()
+            while True:
+                try:
+                    terminal.run_interactive_session()
+                    break  # Exit after session ends normally
+                except (ConnectionError, ValueError) as e:
+                    print(e)
+                    input("\nPress Enter to retry or Ctrl+C to exit...")
+                except KeyboardInterrupt:
+                    print("\n[LOG] Keyboard interrupt detected. Terminating client safely...")
+                    break
+                except Exception as e:
+                    print(e)
+                    input("\nPress Enter to retry or Ctrl+C to exit...")
+        else:
+            # Simple chat mode
+            client.connect()
+            # Optional initial nickname prompt
             try:
-                terminal.run_interactive_session()
-                break  # Exit after session ends normally
-            except (ConnectionError, ValueError) as e:
-                print(e)
-                input("\nPress Enter to retry or Ctrl+C to exit...")
-            except KeyboardInterrupt:
-                print("\n[LOG] Keyboard interrupt detected. Terminating client safely...")
-                break
-            except Exception as e:
-                print(e)
-                input("\nPress Enter to retry or Ctrl+C to exit...")
+                nick = input("Choose a nickname (optional): ").strip()
+                if nick:
+                    pkt = client.create_packet(settings.SET_NICK_TYPE, nick)
+                    client._socket.sendall(pkt)
+                    client._socket.settimeout(0.5)
+                    try:
+                        resp = client._socket.recv(client.BUFFER_SIZE)
+                        _ = client.parse_packet(resp)
+                    except Exception:
+                        pass
+                    finally:
+                        client._socket.settimeout(None)
+            except Exception:
+                pass
+            client.run_chat()
     except KeyboardInterrupt:
         print("\n[LOG] Keyboard interrupt detected. Terminating client safely...")
     except Exception as e:

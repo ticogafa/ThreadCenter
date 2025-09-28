@@ -3,7 +3,6 @@ import struct
 import hashlib
 import random
 import time
-import struct   
 from src.core import settings
 import json
 
@@ -123,21 +122,50 @@ class NetworkDevice:
                     print(f"[ERROR] Incomplete payload received from {client_address}")
                     break
 
-            # Handle special channel config packet (message_type 99)
-                try:
-                    config = json.loads(payload.decode('utf-8'))
-                    print(f"[CONFIG] Received channel config from client: {config}")
-                    self.set_channel_conditions(
-                        loss_prob=float(config.get('loss_prob', 0.0)),
-                        corruption_prob=float(config.get('corruption_prob', 0.0)),
-                        delay_prob=float(config.get('delay_prob', 0.0)),
-                        delay_time=float(config.get('delay_time', 0.0))
-                    )
-                    print("[CONFIG] Channel conditions updated on server.")
-                except Exception as e:
-                    print(f"[ERROR] Failed to parse channel config: {e}")
+                # Handle special channel config packet (message_type 99)
+                if message_type == settings.ERROR_CODE:
+                    try:
+                        config = json.loads(payload.decode('utf-8'))
+                        print(f"[CONFIG] Received channel config from client: {config}")
+                        self.set_channel_conditions(
+                            loss_prob=float(config.get('loss_prob', 0.0)),
+                            corruption_prob=float(config.get('corruption_prob', 0.0)),
+                            delay_prob=float(config.get('delay_prob', 0.0)),
+                            delay_time=float(config.get('delay_time', 0.0))
+                        )
+                        print("[CONFIG] Channel conditions updated on server.")
+                    except Exception as e:
+                        print(f"[ERROR] Failed to parse channel config: {e}")
+                    # Continue waiting next packets
+                    continue
 
                 if message_type == settings.ERROR_CODE:
+                    continue
+
+                # Handle nickname set
+                if message_type == settings.SET_NICK_TYPE:
+                    try:
+                        nickname = payload.decode('utf-8').strip()
+                        if hasattr(self, 'set_nickname') and callable(getattr(self, 'set_nickname')):
+                            self.set_nickname(client_address, nickname)  # type: ignore[attr-defined]
+                        # Optionally ACK
+                        ack = self.create_packet(settings.ACK_TYPE, f"NICK OK: {nickname}")
+                        client_socket.sendall(ack)
+                    except Exception as e:
+                        print(f"[ERROR] Failed to set nickname: {e}")
+                    continue
+
+                # Handle list request
+                if message_type == settings.LIST_REQUEST_TYPE:
+                    try:
+                        names = []
+                        if hasattr(self, 'list_connected') and callable(getattr(self, 'list_connected')):
+                            names = self.list_connected()  # type: ignore[attr-defined]
+                        resp = json.dumps(names)
+                        pkt = self.create_packet(settings.LIST_RESPONSE_TYPE, resp)
+                        client_socket.sendall(pkt)
+                    except Exception as e:
+                        print(f"[ERROR] Failed to send list: {e}")
                     continue
 
                 # Simulate channel conditions
@@ -162,7 +190,8 @@ class NetworkDevice:
                 # Process message based on type
                 if message_type == settings.DATA_TYPE:
                     try:
-                        decoded_message = self.simulate_channel(payload, sequence_num).decode('utf-8')
+                        # Não simule novamente antes do decode; payload já foi verificado
+                        decoded_message = payload.decode('utf-8')
                         print(f"[LOG] Received message fragment from {client_address}: {decoded_message}")
                         received_fragments.append(decoded_message)
                     except Exception:
@@ -177,6 +206,12 @@ class NetworkDevice:
                         if all(isinstance(frag, str) for frag in received_fragments):
                             full_message = ''.join(received_fragments)
                             print(f"[RECONSTRUCTED] Full message from {client_address}: {full_message}")
+                            # Broadcast para outros clientes apenas com a mensagem completa
+                            if hasattr(self, 'broadcast_to_others') and callable(getattr(self, 'broadcast_to_others')):
+                                try:
+                                    self.broadcast_to_others(client_address, full_message.encode('utf-8'))  # type: ignore[attr-defined]
+                                except Exception as e:
+                                    print(f"[ERROR] Broadcast failed: {e}")
                         else:
                             print(f"[RECONSTRUCTED] Received binary fragments from {client_address} (not shown as text)")
 

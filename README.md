@@ -53,6 +53,11 @@ Visualização do diagrama:
 
 ![Diagrama de Arquitetura](docs/diagrama-arquitetura.png)
 
+Fonte editável (Excalidraw):
+- Arquivo: `docs/diagrama-arquitetura.excalidraw`
+- Como abrir/editar: acessar https://excalidraw.com → Menu (☰) → Abrir (Open) → selecionar o arquivo OU arrastar o `.excalidraw` para o canvas.
+- Após editar: Export → PNG/SVG e sobrescrever `docs/diagrama-arquitetura.png`.
+
 Fluxo: Cliente ↔ Servidor (threads) ↔ Queue ↔ Processo de Log → Arquivo  
 Mensagens: fragmentação → envio sequencial (janela) → ACKs → remontagem → broadcast.
 
@@ -167,27 +172,7 @@ python3 src/client.py --window 5 --frag-size 512
 HOST=127.0.0.1 PORT=5001 python3 src/client.py
 ```
 
-10. Execução múltiplos clientes (shell):
-```bash
-for i in 1 2 3; do python3 src/client.py --nick User$i --send "Olá $i" & done
-```
-
-11. Docker (exemplo simples):
-Dockerfile:
-```Dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY . .
-EXPOSE 5001
-CMD ["python", "src/server.py"]
-```
-Build/run:
-```bash
-docker build -t threadcenter .
-docker run -p 5001:5001 threadcenter
-```
-
-12. Virtualenv:
+10. Virtualenv:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate

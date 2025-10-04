@@ -114,11 +114,11 @@ Alterar porta:
 ## Instalação e Execução Rápida
 Servidor:
 ```bash
-python3 src/server.py
+python3 -m src.server
 ```
 Cliente (CLI padrão):
 ```bash
-python3 src/client.py
+python3 -m src.client
 ```
 Encerrar: Ctrl + C.
 

@@ -1,12 +1,10 @@
 import os
 from src.client import Client
-# Remove the direct import from server
 from typing import TYPE_CHECKING
 import json
 
 from src.core import settings
 from src.constants.constants_client import CLIENT_LOGS, CLIENT_ERRORS
-# Use conditional imports to prevent circular dependencies
 if TYPE_CHECKING:
     from src.server import Server
 
@@ -52,7 +50,7 @@ class TerminalUI:
             self.clear_screen()
 
         print("[LOG] Interactive session ended. Disconnecting...")
-        self.client.disconnect()  # type: ignore
+        self.client.disconnect()  
 
     def show_main_menu(self):
         """Display the main menu options"""
@@ -157,7 +155,6 @@ class TerminalUI:
 
         choice = input("\nSelect simulation mode (1-5): ").strip()
 
-        # Default values
         loss_prob = corruption_prob = delay_prob = delay_time = 0.0
         mode = "normal"
         if choice == '1':
@@ -178,12 +175,10 @@ class TerminalUI:
             input("\nPress Enter to continue...")
             return
 
-        # Update local simulation mode for UI only
         self.client.simulation_mode = mode
         self.client.update_simulation_params(loss_prob, corruption_prob, delay_prob, delay_time)
         print(f"[CONFIG] Simulation mode set to {mode.capitalize()}")
 
-        # Send configuration packet to server
         try:
             config_data = {
                 'type': 'channel_config',
@@ -192,7 +187,6 @@ class TerminalUI:
                 'delay_prob': delay_prob,
                 'delay_time': delay_time
             }
-            # Use a reserved message type, e.g., 99
             config_packet = self.client.create_packet(settings.ERROR_CODE, json.dumps(config_data))
             self.client._socket.sendall(config_packet)
 
@@ -242,14 +236,10 @@ class TerminalUI:
             'delay_prob': delay_prob,
             'delay_time': delay_time
         }
-        # Use the reserved config message type, not DATA_TYPE, and do not set last_packet
         config_packet = self.client.create_packet(settings.ERROR_CODE, json.dumps(config_data))
         self.client._socket.sendall(config_packet)
         self.clear_screen()
         print("[CONFIG] Simulation reset to normal mode")
-
-
-# Server Terminal UI class
 class ServerTerminalUI:
     def __init__(self, server):
         """Initialize the terminal UI with a reference to the server"""

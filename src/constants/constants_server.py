@@ -1,6 +1,3 @@
-# constants_server.py
-
-# Server log and error messages
 class SERVER_LOGS:
     START = '[LOG] Server started on {host}:{port}'
     PROTOCOL = '[LOG] Protocol: {protocol}, Max fragment size: {max_fragment_size} characters'

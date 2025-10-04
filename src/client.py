@@ -10,42 +10,34 @@ from src.core import settings
 from src.constants.constants_client import CLIENT_LOGS, CLIENT_ERRORS
 from src.core.settings import DEFAULT_PORT
 
-#ultimo teste de vez
 class Client(NetworkDevice):
     def __init__(self, server_addr='127.0.0.1', server_port=DEFAULT_PORT, protocol='gbn', max_fragment_size=3, window_size=4):
-        # Call parent constructor with the new parameter name
         super().__init__(server_addr, server_port, protocol, max_fragment_size, window_size)
         
-        # Client-specific attributes
         self.handshake_complete = False
         self.session_id = None
         self.is_connected = False
-        self._receiver_thread = None  # type: ignore[assignment]
+        self._receiver_thread = None  
         self._stop_event = threading.Event()
         self._ack_queue = queue.Queue()
         self._last_messages = deque(maxlen=50)
         self._last_full_messages = deque(maxlen=50)
         self._reassembly = {}
-        # Sliding window buffers
-        self.packet_buffer = {}  # Store packets that have been sent but not acknowledged
-        self.ack_received = set()  # Keep track of which packets have been acknowledged
-        self.last_timeout = 0  # Track when the last timeout occurred
-        self.retry_count = 0    # Track retry attempts
-        self.max_retries = 5    # Maximum number of retries before giving up
+        self.packet_buffer = {} 
+        self.ack_received = set() 
+        self.last_timeout = 0 
+        self.retry_count = 0   
+        self.max_retries = 5 
         
-        # Simulation mode - for deterministic outcomes
-        self.simulation_mode = "normal"  # Options: normal, loss, corruption, delay
+        self.simulation_mode = "normal" 
         
-        # For SR, window also includes base and window size
         window_start = self.base_seq_num
         window_end = window_start + self.window_size - 1
         print(CLIENT_LOGS.WINDOW_SR.format(window_start=window_start, window_end=window_end))
-        # For SR, show which packets have been acked within the window
         acked_in_window = [seq for seq in self.ack_received if window_start <= seq <= window_end]
         if acked_in_window:
             print(CLIENT_LOGS.WINDOW_ACKED.format(acked_in_window=sorted(acked_in_window)))
         
-        # Show packets that haven't been acked yet
         unacked = [seq for seq in range(window_start, min(self.next_seq_num, window_end + 1))
                     if seq not in self.ack_received]
         if unacked:
@@ -53,16 +45,13 @@ class Client(NetworkDevice):
     
     def connect(self):
         """Establish a connection with the server using the three-way handshake protocol"""
-        # No try/except here; let errors bubble up
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.connect((self.server_addr, self.server_port))
 
-        # STEP 1: SYN - Client → Server
         print(CLIENT_LOGS.CONNECTED.format(server_addr=self.server_addr, server_port=self.server_port))
         print(CLIENT_LOGS.SENDING_SYN.format(protocol=self.protocol, max_fragment_size=self.max_fragment_size, window_size=self.window_size))
         self.handle_packet(settings.SYN_TYPE, json.dumps(self.connection_params))
 
-        # STEP 2: Wait for SYN-ACK from Server
         print(CLIENT_LOGS.WAIT_SYNACK)
         response_packet = self._socket.recv(self.BUFFER_SIZE)
         if not response_packet:
@@ -72,14 +61,12 @@ class Client(NetworkDevice):
         if not parsed:
             raise ValueError(CLIENT_ERRORS.INVALID_RESPONSE)
 
-        # Process SYN-ACK
         syn_ack_data = json.loads(parsed['payload'])
         print(CLIENT_LOGS.RECEIVED_SYNACK.format(syn_ack_data=syn_ack_data))
 
         if syn_ack_data.get('status') != 'ok':
             raise ConnectionError(CLIENT_ERRORS.HANDSHAKE_FAILED.format(message=syn_ack_data.get('message', 'Unknown error')))
 
-        # Store session information
         self.session_id = syn_ack_data.get('session_id')
         self.max_fragment_size = syn_ack_data.get('max_fragment_size', self.max_fragment_size)
         self.protocol = syn_ack_data.get('protocol', self.protocol)
@@ -88,14 +75,12 @@ class Client(NetworkDevice):
         self.connection_params['protocol'] = self.protocol
         self.connection_params['window_size'] = self.window_size
 
-        # STEP 3: ACK - Client → Server
         print(CLIENT_LOGS.SENDING_ACK)
         ack_data = {'session_id': self.session_id, 'message': 'Connection established'}
         self.handle_packet(settings.HANDSHAKE_ACK_TYPE, json.dumps(ack_data))
 
         self.handshake_complete = True
         self.is_connected = True
-        # Start receiver thread to listen server/broadcast messages
         self._stop_event.clear()
         self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self._receiver_thread.start()
@@ -125,34 +110,29 @@ class Client(NetworkDevice):
             data_packet = self.create_packet(settings.DATA_TYPE, encoded_message, sequence_num=seq_num, last_packet=last_packet)
             print(CLIENT_LOGS.SENDING_FRAGMENT.format(current=seq_num+1, total=total_fragments, fragment=fragment, seq_num=seq_num))
             self._socket.sendall(data_packet)
-            # Wait for ACK/NACK for this sequence from receiver thread
             while True:
                 try:
                     parsed = self._ack_queue.get(timeout=5.0)
                 except queue.Empty:
                     raise ConnectionError(CLIENT_ERRORS.NO_RESPONSE)
                 if parsed.get('sequence') != seq_num:
-                    # Not for us; ignore (single outstanding send typical). Could buffer if needed.
                     continue
                 if parsed['type'] == settings.ACK_TYPE:
                     print(CLIENT_LOGS.SERVER_ACK.format(seq_num=seq_num))
                     break
                 if parsed['type'] == settings.NACK_TYPE:
                     print(CLIENT_LOGS.SERVER_NACK.format(seq_num=seq_num))
-                    # retry outer while True
                     break
-                # Unknown type; keep waiting
             if parsed['type'] == settings.ACK_TYPE:
                 break
 
     def reset_parameters(self):
-        # Reset sequence numbers for this message
         self.base_seq_num = 0
         self.next_seq_num = 0
         self.packet_buffer.clear()
         self.ack_received.clear()
         self.last_timeout = 0
-        self.retry_count = 0  # Reset retry counter for new message
+        self.retry_count = 0  
 
     def fragment_message(self, message):
         """Fragment the message into smaller chunks based on max_fragment_size"""
@@ -165,7 +145,6 @@ class Client(NetworkDevice):
 
     def process_acks(self):
         """Helper method to process acknowledgments"""
-        # Let errors bubble up
         while True:
             response_packet = self._socket.recv(self.BUFFER_SIZE)
             if not response_packet:
@@ -183,42 +162,32 @@ class Client(NetworkDevice):
         ack_seq = parsed.get('sequence', 0)
         
         if self.protocol == 'gbn':
-            # Go-Back-N: Move the base forward
             print(CLIENT_LOGS.RECEIVED_ACK.format(ack_seq=ack_seq))
             
             if ack_seq < self.base_seq_num:
-                # Duplicate or old ACK, ignore
                 return
                 
-            # Update the base sequence number
             old_base = self.base_seq_num
             self.base_seq_num = ack_seq + 1
             
-            # Clean up the buffer for acknowledged packets
             for seq in range(old_base, self.base_seq_num):
                 if seq in self.packet_buffer:
                     del self.packet_buffer[seq]
             
-            # Display window update
             print(CLIENT_LOGS.WINDOW_MOVED.format(old_base=old_base, old_end=old_base + self.window_size - 1, new_base=self.base_seq_num, new_end=self.base_seq_num + self.window_size - 1))
             return
             
-        # Selective Repeat: Mark the specific packet as acknowledged
         print(CLIENT_LOGS.RECEIVED_ACK.format(ack_seq=ack_seq))
         
-        # Mark this packet as acknowledged
         self.ack_received.add(ack_seq)
         
-        # Move the base if possible
         old_base = self.base_seq_num
         while self.base_seq_num in self.ack_received:
-            # Clean up the buffer for the base packet
             if self.base_seq_num in self.packet_buffer:
                 del self.packet_buffer[self.base_seq_num]
             
             self.base_seq_num += 1
         
-        # Display window update if it moved
         if old_base != self.base_seq_num:
             print(CLIENT_LOGS.WINDOW_MOVED.format(old_base=old_base, old_end=old_base + self.window_size - 1, new_base=self.base_seq_num, new_end=self.base_seq_num + self.window_size - 1))
 
@@ -227,7 +196,6 @@ class Client(NetworkDevice):
         nack_seq = parsed.get('sequence', 0)
         
         if self.protocol == 'gbn':
-            # Go-Back-N: Resend all packets from base to next_seq_num - 1
             print(CLIENT_LOGS.RECEIVED_NACK.format(nack_seq=nack_seq))
             for seq in range(self.base_seq_num, self.next_seq_num):
                 if seq in self.packet_buffer:
@@ -235,7 +203,6 @@ class Client(NetworkDevice):
                     self._socket.sendall(self.packet_buffer[seq])
             return
             
-        # Selective Repeat: Resend only the NACKed packet
         print(CLIENT_LOGS.RECEIVED_NACK.format(nack_seq=nack_seq))
         
         if nack_seq in self.packet_buffer:
@@ -281,7 +248,6 @@ class Client(NetworkDevice):
                             txt = f"<binary {len(parsed['payload'])} bytes>"
                         print(f"\n[BROADCAST] {txt}")
                         self._last_messages.append(txt)
-                        # Tenta reconstituir mensagem completa por remetente usando last_packet
                         from_addr = "_"
                         content = txt
                         if txt.startswith('[') and '] ' in txt:
@@ -298,12 +264,10 @@ class Client(NetworkDevice):
                             self._last_full_messages.append(full)
                             self._reassembly[from_addr] = []
                     elif parsed['type'] in (settings.ACK_TYPE, settings.NACK_TYPE):
-                        # Route ACK/NACK to sender path via queue
                         try:
                             self._ack_queue.put_nowait(parsed)
                         except Exception:
                             pass
-                    # Other types are handled by sender path
                 except socket.timeout:
                     continue
                 except Exception:
@@ -320,7 +284,6 @@ class Client(NetworkDevice):
                 msg = input("> ")
                 if not msg:
                     continue
-                # Commands
                 if msg.startswith('/who'):
                     try:
                         pkt = self.create_packet(settings.LIST_REQUEST_TYPE, "{}")
@@ -346,7 +309,6 @@ class Client(NetworkDevice):
                     try:
                         pkt = self.create_packet(settings.SET_NICK_TYPE, name)
                         self._socket.sendall(pkt)
-                        # optional ack read (non-blocking best-effort)
                         self._socket.settimeout(0.5)
                         try:
                             resp = self._socket.recv(self.BUFFER_SIZE)
@@ -366,9 +328,7 @@ class Client(NetworkDevice):
 
 if __name__ == '__main__':
     try:
-        # Parse command line arguments
         parser = argparse.ArgumentParser(description='Custom Protocol Client')
-        # Defaults are only fallbacks; we'll prompt the user if flags are omitted
         parser.add_argument('--host', default=None, help='Server address (optional; will prompt)')
         parser.add_argument('--port', type=int, default=None, help='Server port (optional; will prompt)')
         parser.add_argument('--max-fragment-size', type=int, default=3, help='Maximum fragment size')
@@ -376,13 +336,11 @@ if __name__ == '__main__':
                             help='Reliable transfer protocol (Go-Back-N or Selective Repeat)')
         parser.add_argument('--window-size', type=int, default=4,
                             help='Sliding window size (number of packets in flight)')
-        # Force default mode to chat; UI still available with --mode ui
         parser.add_argument('--mode', choices=['ui', 'chat'], default='chat',
                             help='Run in interactive UI or simple chat')
 
         args = parser.parse_args()
 
-        # Prompt for host/port if omitted
         host = args.host or input("Server host [127.0.0.1]: ").strip() or '127.0.0.1'
         try:
             port_str = (str(args.port) if args.port is not None
@@ -391,7 +349,6 @@ if __name__ == '__main__':
         except Exception:
             port = DEFAULT_PORT
 
-        # Create client with provided arguments
         client = Client(
             server_addr=host,
             server_port=port,
@@ -407,7 +364,7 @@ if __name__ == '__main__':
             while True:
                 try:
                     terminal.run_interactive_session()
-                    break  # Exit after session ends normally
+                    break 
                 except (ConnectionError, ValueError) as e:
                     print(e)
                     input("\nPress Enter to retry or Ctrl+C to exit...")
@@ -418,9 +375,7 @@ if __name__ == '__main__':
                     print(e)
                     input("\nPress Enter to retry or Ctrl+C to exit...")
         else:
-            # Simple chat mode
             client.connect()
-            # Optional initial nickname prompt
             try:
                 nick = input("Choose a nickname (optional): ").strip()
                 if nick:

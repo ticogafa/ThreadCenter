@@ -1,5 +1,3 @@
-# constants_client.py
-
 class CLIENT_LOGS:
     CONNECTED = '[LOG] Connected to server at {server_addr}:{server_port}'
     SENDING_SYN = '[LOG] Sending SYN packet with protocol={protocol}, max_fragment_size={max_fragment_size}, window_size={window_size}...'
